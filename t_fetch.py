@@ -26,12 +26,12 @@ def connect(address: str):
 
 
 def fetch_segments(instr, channel: int = 1):
-    print("Stopping acquisition for download...")
     instr.write(":STOP") 
     time.sleep(0.5) # give it time to settle
 
     instr.write(f":WAVeform:SOURce CHANnel{channel}")
-    instr.write(":WAVeform:FORMat BYTE")
+    instr.write(":WAVeform:FORMat WORD")
+    instr.write(":WAVeform:BYTeorder LSBF") 
     instr.write(":WAVeform:POINts:MODE RAW")
 
     actual_points = int(instr.query(":WAVeform:POINts?"))
@@ -49,47 +49,56 @@ def fetch_segments(instr, channel: int = 1):
 
     print(f"Scope reports {n_segs} segments, {actual_points} points available per segment")
     
-    if actual_points == 0:
+    instr.write(":DIGITIZE")
+
+    if (actual_points == 0) or (n_segs == 0):
         err = instr.query(":SYSTem:ERRor?").strip()
         print(f"Scope Error: {err}")
 
+    while True:
+        status = instr.query(":ACQuire:STATE?").strip()
+        if status == "0":
+            break
+        time.sleep(0.05)
 
     all_t = []
     all_v = []
+    ttags = []
     start = time.time()
 
     for seg in range(1, n_segs + 1):
         instr.write(f":ACQuire:SEGMented:INDex {seg}")
         ttag = float(instr.query(":ACQuire:SEGMented:TTAG?"))
+        ttags.append(ttag)
 
         raw = instr.query_binary_values(
-            ":WAVeform:DATA?", datatype="B", container=np.array
+            ":WAVeform:DATA?", datatype="H", container=np.array, is_big_endian=False
         )
         
         if len(raw) == 0:
-            print(f"Warning: Segment {seg} returned 0 points")
+            print(f"seg {seg}: 0")
             continue
 
         # use actual number of received points for the time array
-        t_seg = x_orig + np.arange(len(raw)) * x_inc + ttag
-
+        t_seg = ttag + np.arange(len(raw)) * x_inc
         voltage = (raw - y_ref) * y_inc + y_orig
+
         all_t.append(t_seg)
         all_v.append(voltage)
 
     elapsed = time.time() - start
-    print(f"Download complete in {elapsed:.2f}s")
 
-    return np.concatenate(all_t), np.concatenate(all_v)
+    return np.concatenate(all_t), np.concatenate(all_v), ttags
 
 
-def fetch_single(instr, channel: int = 1):
+def fetch_single(instr, channel: int = 1, num_points: int = 1000):
     instr.write(":STOP")
     instr.write(f":WAVeform:SOURce CHANnel{channel}")
 
-    instr.write(":WAVeform:FORMat WORD") # was byte 256 nivs -> 65536 nivs
+    instr.write(":WAVeform:FORMat WORD")
+    instr.write(":WAVeform:BYTeorder LSBF") ## mss toch bit order
     instr.write(":WAVeform:POINts:MODE RAW")
-    instr.write(":WAVeform:POINts 15985")
+    instr.write(f":WAVeform:POINts {num_points}")
 
     x_inc  = float(instr.query(":WAVeform:XINCrement?"))
     x_orig = float(instr.query(":WAVeform:XORigin?"))
@@ -101,7 +110,7 @@ def fetch_single(instr, channel: int = 1):
     print(f"Waveform: {points} points available")
 
     raw = instr.query_binary_values(
-        ":WAVeform:DATA?", datatype="H", container=np.array # h: signed, H unsinged
+        ":WAVeform:DATA?", datatype="H", container=np.array, is_big_endian=False ## bit order en probeer h als datatype toch ook eens
     )
     
     if len(raw) == 0:
@@ -111,6 +120,40 @@ def fetch_single(instr, channel: int = 1):
 
     t = x_orig + np.arange(len(raw)) * x_inc
     v = (raw - y_ref) * y_inc + y_orig
+
+    return t, v
+
+## same function but for ascii acquisition, should be auto formatted on the vertical axis
+def singleAscii(instr, channel: int = 1, num_points: int = 1000):
+
+    instr.write(":STOP")
+    instr.write(f":WAVeform:SOURce CHANnel{channel}")
+
+    instr.write(":WAVeform:FORMat ASCII")
+    print(instr.query(":WAVeform:FORMat?"))
+    instr.write(":WAVeform:POINts:MODE RAW")
+    instr.write(f":WAVeform:POINts {num_points}")
+    points = int(instr.query(":WAVeform:POINts?"))
+    print(f"Waveform: {points} points available")
+
+    x_inc  = float(instr.query(":WAVeform:XINCrement?"))
+    x_orig = float(instr.query(":WAVeform:XORigin?"))
+
+    raw_str = instr.query(":WAVeform:DATA?")
+
+    if raw_str.startswith("#"):
+        n_digits = int(raw_str[1])
+        raw_str = raw_str[2 + n_digits:]
+
+    values = np.array([float(v) for v in raw_str.split(",") if v.strip()])
+
+    if len(values) == 0:
+        err = instr.query(":SYSTem:ERRor?").strip()
+        print(f"Scope Error: {err}")
+        return np.array([]), np.array([])
+
+    t = x_orig + np.arange(len(values)) * x_inc
+    v = values  # formatted?
 
     return t, v
 
@@ -146,7 +189,8 @@ def main():
         if "SEGM" in mode.upper():
             t, v = fetch_segments(scope, channel=CHANNEL)
         else:
-            t, v = fetch_single(scope, channel=CHANNEL)
+            # t, v = fetch_single(scope, channel=CHANNEL)
+            t, v = singleAscii(scope, channel=CHANNEL)
 
         save_csv(t, v)
         plot_data(t, v)
@@ -158,3 +202,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
